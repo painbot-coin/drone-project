@@ -1,0 +1,6 @@
+Method,Success Rate (%),Avg Path Length,Std Dev Path,Avg Time (s),Std Dev Time,Avg Collisions,Avg Battery (%),Avg Training Time (s),Avg Episodes to Converge
+A*,100.00,39.00,0.00,0.0009,0.0003,0.00,15.60,0.0000,0.00
+D* Lite,100.00,39.00,0.00,0.0119,0.0032,0.00,15.60,0.0000,0.00
+Double Q-Learning,98.00,40.51,2.87,0.0602,0.2094,0.00,16.20,0.0601,350.00
+MR-QLearning,90.00,41.40,2.16,0.4168,1.0035,0.00,16.56,0.4168,350.00
+Hybrid A* + MR-QL,100.00,39.00,0.00,0.0011,0.0021,0.00,15.60,0.0000,0.00
