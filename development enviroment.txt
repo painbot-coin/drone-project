@@ -1,0 +1,463 @@
+#development enviroment 
+import tkinter as tk
+import random
+import time
+import heapq
+
+# ===============================
+# Parameters
+# ===============================
+GRID_SIZE = 20
+CELL_SIZE = 25
+OBSTACLE_PERCENT = 0.10
+BATTERY_FULL = 100
+
+# ===============================
+# Environment
+# ===============================
+class Environment:
+    def __init__(self, grid_size=GRID_SIZE):
+        self.grid_size = grid_size
+        self.grid = [[0 for _ in range(grid_size)] for _ in range(grid_size)]
+        self.start = (0, 0)
+        self.goal = (grid_size - 1, grid_size - 1)
+
+    def generate_obstacles(self, max_attempts=1000):
+        """Regenerate obstacle maps until solvable (or until attempts exhausted)."""
+        attempts = 0
+        while attempts < max_attempts:
+            attempts += 1
+            self.grid = [[0 for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+            for i in range(self.grid_size):
+                for j in range(self.grid_size):
+                    if random.random() < OBSTACLE_PERCENT and (i, j) not in (self.start, self.goal):
+                        self.grid[i][j] = 1
+            ast = AStar(self.grid, self.start, self.goal)
+            path = ast.search()
+            if path:
+                return True
+        # if not solvable after attempts, clear some obstacles to ensure solvability
+        # fallback: clear a straight path
+        x, y = self.start
+        while x < self.goal[0]:
+            self.grid[x][y] = 0
+            x += 1
+        while y < self.goal[1]:
+            self.grid[x][y] = 0
+            y += 1
+        return True
+
+# ===============================
+# A* (improved with heapq)
+# ===============================
+class AStar:
+    def __init__(self, grid, start, goal):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+
+    def heuristic(self, node):
+        return abs(node[0] - self.goal[0]) + abs(node[1] - self.goal[1])
+
+    def get_neighbors(self, node):
+        neighbors = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = node[0] + dx, node[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid) and self.grid[nx][ny] == 0:
+                neighbors.append((nx, ny))
+        return neighbors
+
+    def search(self):
+        open_heap = []
+        heapq.heappush(open_heap, (self.heuristic(self.start), 0, self.start))
+        came_from = {}
+        g_score = {self.start: 0}
+
+        while open_heap:
+            f, g, current = heapq.heappop(open_heap)
+            if current == self.goal:
+                # reconstruct
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                return path[::-1]
+            for neighbor in self.get_neighbors(current):
+                tentative_g = g_score[current] + 1
+                if tentative_g < g_score.get(neighbor, float('inf')):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    f_score = tentative_g + self.heuristic(neighbor)
+                    heapq.heappush(open_heap, (f_score, tentative_g, neighbor))
+        return []
+
+
+# ===============================
+# MR-QLearning (improved Q-Learning)
+# ===============================
+class MRQLearning:
+    """
+    MR-QLearning: Reward shaping + heuristic-guided exploration.
+    """
+
+    def __init__(self, grid, start, goal, episodes=300, alpha=0.7, gamma=0.9,
+                 epsilon=0.25, epsilon_decay=0.995, min_epsilon=0.05,
+                 progress_weight=5.0, collision_penalty=-50):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+        self.q_table = {}  # dict: state -> dict(action -> value)
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        self.min_epsilon = min_epsilon
+        self.episodes = episodes
+        # reward shaping weights
+        self.progress_weight = progress_weight  # reward for reducing distance
+        self.collision_penalty = collision_penalty
+        # stats
+        self.success_count = 0
+
+    def heuristic(self, state):
+        return abs(state[0] - self.goal[0]) + abs(state[1] - self.goal[1])
+
+    def get_actions(self, state):
+        actions = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = state[0] + dx, state[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid) and self.grid[nx][ny] == 0:
+                actions.append((nx, ny))
+        return actions
+
+    def choose_action(self, state):
+        """
+        Epsilon-greedy with heuristic bias on exploration:
+        when selecting random action, prefer actions that reduce heuristic distance.
+        """
+        actions = self.get_actions(state)
+        if not actions:
+            return state
+
+        if random.random() > self.epsilon:
+            # exploit: choose best known action
+            q_values = self.q_table.get(state, {})
+            if q_values:
+                # choose key with max value (ties -> random)
+                max_val = max(q_values.values())
+                best = [a for a, v in q_values.items() if v == max_val]
+                return random.choice(best)
+            # fallback to heuristic choice if no Q values
+            actions_sorted = sorted(actions, key=lambda a: self.heuristic(a))
+            return actions_sorted[0]
+
+        # explore: bias by heuristic improvement (probabilistic)
+        current_h = self.heuristic(state)
+        improvements = []
+        for a in actions:
+            # improvement measure: positive if closer
+            improvement = current_h - self.heuristic(a)
+            improvements.append((a, improvement))
+        # convert improvements to weights (shift to positive)
+        min_impr = min(impr for _, impr in improvements)
+        weights = []
+        for _, impr in improvements:
+            # prefer larger improvement: weight = 1 + progress_weight * positive_improvement
+            w = 1.0 + (self.progress_weight * max(0, impr))
+            weights.append(w)
+        # choose using weighted random
+        total = sum(weights)
+        r = random.random() * total
+        cum = 0.0
+        for (a, _), w in zip(improvements, weights):
+            cum += w
+            if r <= cum:
+                return a
+        return actions[-1]
+
+    def update_q(self, state, action, reward, next_state):
+        old_q = self.q_table.get(state, {}).get(action, 0.0)
+        next_max = max(self.q_table.get(next_state, {}).values(), default=0.0)
+        new_q = (1 - self.alpha) * old_q + self.alpha * (reward + self.gamma * next_max)
+        if state not in self.q_table:
+            self.q_table[state] = {}
+        self.q_table[state][action] = new_q
+
+    def shaped_reward(self, state, action):
+        """Shaped reward: goal reward, collision penalty, progress bonus, small step penalty."""
+        if action == self.goal:
+            return 200.0  # large positive
+        # if attempted to step into obstacle (shouldn't normally happen because actions avoid obstacles)
+        if self.grid[action[0]][action[1]] == 1:
+            return self.collision_penalty
+        # progress: positive if distance reduced
+        prev_h = self.heuristic(state)
+        new_h = self.heuristic(action)
+        progress = prev_h - new_h
+        # small step penalty to encourage fewer steps
+        step_penalty = -1.0
+        return step_penalty + self.progress_weight * progress
+
+    def train(self, early_stop_window=30, early_stop_threshold=0.9):
+        """
+        Train with epsilon decay and early stopping when success rate is high.
+        early_stop_window: window size to compute success ratio
+        early_stop_threshold: threshold fraction of successes to stop early
+        """
+        success_history = []
+        for ep in range(self.episodes):
+            state = self.start
+            steps = 0
+            max_steps = len(self.grid) * len(self.grid) * 2
+            success = False
+
+            while steps < max_steps:
+                action = self.choose_action(state)
+                reward = self.shaped_reward(state, action)
+                self.update_q(state, action, reward, action)
+                state = action
+                steps += 1
+                if state == self.goal:
+                    success = True
+                    break
+
+            # decay epsilon
+            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+            success_history.append(1 if success else 0)
+
+            # check early stop
+            if len(success_history) >= early_stop_window:
+                window = success_history[-early_stop_window:]
+                if sum(window) / early_stop_window >= early_stop_threshold:
+                    # considered converged
+                    break
+
+        # store success count for info
+        self.success_count = sum(success_history)
+
+    def get_path(self, max_steps=500):
+        path = [self.start]
+        state = self.start
+        steps = 0
+        while state != self.goal and steps < max_steps:
+            q_values = self.q_table.get(state, {})
+            if not q_values:
+                break
+            next_state = max(q_values, key=q_values.get)
+            if self.grid[next_state[0]][next_state[1]] == 1:
+                break
+            path.append(next_state)
+            state = next_state
+            steps += 1
+        if state != self.goal:
+            # fallback to A*
+            ast = AStar(self.grid, self.start, self.goal)
+            return ast.search()
+        return path
+
+
+# ===============================
+# Simulator Frame
+# ===============================
+class SimulatorFrame:
+    def __init__(self, root, env, title, mode="astar", moving_obstacles=False):
+        self.root = root
+        self.env = env
+        self.mode = mode
+        self.moving_obstacles = moving_obstacles
+        self.root.title(title)
+
+        self.canvas = tk.Canvas(root, width=GRID_SIZE*CELL_SIZE, height=GRID_SIZE*CELL_SIZE, bg="white")
+        self.canvas.pack()
+        self.info_label = tk.Label(root, text="")
+        self.info_label.pack()
+
+        # Speed control
+        self.speed_scale = tk.Scale(root, from_=20, to=1000, orient="horizontal", label="Speed (ms per step)")
+        self.speed_scale.set(150)
+        self.speed_scale.pack()
+
+        # Buttons
+        self.run_button = tk.Button(root, text="Run Simulation", command=self.run_simulation)
+        self.run_button.pack()
+        self.map_button = tk.Button(root, text="Generate New Map", command=self.new_map)
+        self.map_button.pack()
+
+        self.draw_grid()
+
+        # List of moving obstacles
+        self.moving_list = []
+        if self.moving_obstacles:
+            for i in range(GRID_SIZE):
+                for j in range(GRID_SIZE):
+                    if self.env.grid[i][j] == 1 and random.random() < 0.1:
+                        self.moving_list.append((i, j))
+
+    def draw_grid(self):
+        self.canvas.delete("all")
+        for i in range(GRID_SIZE):
+            for j in range(GRID_SIZE):
+                x1, y1 = j*CELL_SIZE, i*CELL_SIZE
+                x2, y2 = x1+CELL_SIZE, y1+CELL_SIZE
+                color = "black" if self.env.grid[i][j] == 1 else "white"
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="gray")
+        # start and goal markers
+        sx, sy = self.env.start
+        gx, gy = self.env.goal
+        self.canvas.create_rectangle(sy*CELL_SIZE, sx*CELL_SIZE, (sy+1)*CELL_SIZE, (sx+1)*CELL_SIZE, fill="green")
+        self.canvas.create_rectangle(gy*CELL_SIZE, gx*CELL_SIZE, (gy+1)*CELL_SIZE, (gx+1)*CELL_SIZE, fill="red")
+
+    def move_obstacles(self):
+        new_pos = []
+        # move a small subset to keep dynamics manageable
+        random.shuffle(self.moving_list)
+        for x, y in list(self.moving_list):
+            # clear old
+            if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
+                self.env.grid[x][y] = 0
+            dx, dy = random.choice([(0,1),(1,0),(-1,0),(0,-1)])
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
+                if (nx, ny) not in [self.env.start, self.env.goal] and self.env.grid[nx][ny] == 0:
+                    self.env.grid[nx][ny] = 1
+                    new_pos.append((nx, ny))
+                else:
+                    # stay
+                    if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
+                        self.env.grid[x][y] = 1
+                        new_pos.append((x, y))
+            else:
+                if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
+                    self.env.grid[x][y] = 1
+                    new_pos.append((x, y))
+        self.moving_list = new_pos
+
+    def animate_path(self, path, color):
+        delay = self.speed_scale.get()
+        battery = BATTERY_FULL
+        steps_count = max(len(path), 1)
+        for step in path:
+            if self.moving_obstacles:
+                self.move_obstacles()
+            self.draw_grid()
+            self.canvas.create_rectangle(step[1]*CELL_SIZE, step[0]*CELL_SIZE,
+                                         (step[1]+1)*CELL_SIZE, (step[0]+1)*CELL_SIZE, fill=color)
+            self.root.update()
+            time.sleep(delay/1000)
+            battery -= BATTERY_FULL / steps_count
+            if battery < 0:
+                battery = 0
+        return battery
+
+    def animate_hybrid(self, global_path):
+        delay = self.speed_scale.get()
+        battery = BATTERY_FULL
+        if not global_path:
+            return battery
+        state = global_path[0]
+        i = 0
+        steps_total = max(len(global_path), 1)
+        while i < len(global_path):
+            step = global_path[i]
+
+            if self.moving_obstacles:
+                self.move_obstacles()
+
+            # if planned step is now blocked (dynamic obstacle), use MR-QL locally
+            if self.env.grid[step[0]][step[1]] == 1 and step != self.env.goal:
+                rl = MRQLearning(self.env.grid, state, self.env.goal, episodes=250)
+                rl.train()
+                local_path = rl.get_path(max_steps=200)
+                if local_path and local_path[0] == state:
+                    # replace the remainder with local_path (skip repeated state)
+                    new_global = [state] + local_path[1:]
+                    # append remaining planned steps after the local path if still valid
+                    # (this might be conservative)
+                    global_path = new_global + global_path[i+1:]
+                    i = 0
+                    steps_total = max(len(global_path), 1)
+                    continue
+                else:
+                    # fallback: replan global with A*
+                    ast = AStar(self.env.grid, state, self.env.goal)
+                    gp = ast.search()
+                    if gp:
+                        global_path = gp
+                        i = 0
+                        steps_total = max(len(global_path), 1)
+                        continue
+                    else:
+                        # no path, abort
+                        break
+
+            self.draw_grid()
+            self.canvas.create_rectangle(step[1]*CELL_SIZE, step[0]*CELL_SIZE,
+                                         (step[1]+1)*CELL_SIZE, (step[0]+1)*CELL_SIZE, fill="purple")
+            self.root.update()
+            time.sleep(delay/1000)
+            battery -= BATTERY_FULL / steps_total
+            state = step
+            i += 1
+            if battery <= 0:
+                battery = 0
+                break
+
+        return battery
+
+    def run_simulation(self):
+        self.draw_grid()
+        if self.mode == "astar":
+            astar = AStar(self.env.grid, self.env.start, self.env.goal)
+            path = astar.search()
+            battery = self.animate_path(path, "blue")
+            info = f"A*: Steps={len(path)}, Battery={battery:.1f}%"
+        elif self.mode == "rl":
+            rl = MRQLearning(self.env.grid, self.env.start, self.env.goal, episodes=350)
+            start_time = time.time()
+            rl.train()
+            training_time = time.time() - start_time
+            path = rl.get_path()
+            battery = self.animate_path(path, "green")
+            info = f"MR-QL: Steps={len(path)}, Battery={battery:.1f}%, EpisodesUsed~{rl.episodes if rl.episodes else 'auto'}, Successes={rl.success_count}, TrainTime={training_time:.2f}s"
+        elif self.mode == "hybrid":
+            astar = AStar(self.env.grid, self.env.start, self.env.goal)
+            global_path = astar.search()
+            battery = self.animate_hybrid(global_path)
+            info = f"Hybrid (A*+MR-QL): Steps={len(global_path)}, Battery={battery:.1f}%"
+        else:
+            info = "Unknown mode"
+        self.info_label.config(text=info)
+
+    def new_map(self):
+        self.env.generate_obstacles()
+        # reinitialize moving obstacles if needed
+        self.moving_list = []
+        if self.moving_obstacles:
+            for i in range(GRID_SIZE):
+                for j in range(GRID_SIZE):
+                    if self.env.grid[i][j] == 1 and random.random() < 0.08:
+                        self.moving_list.append((i, j))
+        self.draw_grid()
+        self.info_label.config(text="")
+
+
+# ===============================
+# Main Execution (3 Windows)
+# ===============================
+if __name__ == "__main__":
+    root = tk.Tk()
+    env1 = Environment()
+    env1.generate_obstacles()
+    sim1 = SimulatorFrame(root, env1, "A* on Static Obstacles", mode="astar")
+
+    win2 = tk.Toplevel(root)
+    env2 = Environment()
+    env2.generate_obstacles()
+    sim2 = SimulatorFrame(win2, env2, "Improved-QL on Moving Obstacles", mode="rl", moving_obstacles=True)
+
+    win3 = tk.Toplevel(root)
+    env3 = Environment()
+    env3.generate_obstacles()
+    sim3 = SimulatorFrame(win3, env3, "Hybrid A* + MR-QL", mode="hybrid", moving_obstacles=True)
+
+    root.mainloop()
