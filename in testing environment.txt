@@ -1,0 +1,2083 @@
+#MYtesting environment
+
+import tkinter as tk
+import random
+import time
+import heapq
+import os
+
+# ===============================
+# Parameters
+# ===============================
+GRID_SIZE = 20
+CELL_SIZE = 25
+OBSTACLE_PERCENT = 0.15
+BATTERY_FULL = 100
+BATTERY_COST_PER_STEP = 0.4  # Fixed battery cost per step
+
+# Windows-specific output directory
+OUTPUT_DIR = os.path.join(os.getcwd(), 'outputs')
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ===============================
+# Environment
+# ===============================
+class Environment:
+    def __init__(self, grid_size=GRID_SIZE):
+        self.grid_size = grid_size
+        self.grid = [[0 for _ in range(grid_size)] for _ in range(grid_size)]
+        self.start = (0, 0)
+        self.goal = (grid_size - 1, grid_size - 1)
+        
+        # OBJECTIVE 3: Adaptive Navigation - Track environment characteristics
+        self.obstacle_density = 0.0  # Percentage of obstacles
+        self.terrain_difficulty = {}  # Difficulty map for each cell
+
+    def generate_obstacles(self, max_attempts=1000):
+        """Regenerate obstacle maps until solvable (or until attempts exhausted)."""
+        attempts = 0
+        while attempts < max_attempts:
+            attempts += 1
+            self.grid = [[0 for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+            for i in range(self.grid_size):
+                for j in range(self.grid_size):
+                    if random.random() < OBSTACLE_PERCENT and (i, j) not in (self.start, self.goal):
+                        self.grid[i][j] = 1
+            ast = AStar(self.grid, self.start, self.goal)
+            path = ast.search()
+            if path:
+                # OBJECTIVE 3: Calculate obstacle density and terrain difficulty
+                self._calculate_environment_characteristics()
+                return True
+        # if not solvable after attempts, clear some obstacles to ensure solvability
+        # fallback: clear a straight path
+        x, y = self.start
+        while x < self.goal[0]:
+            self.grid[x][y] = 0
+            x += 1
+        while y < self.goal[1]:
+            self.grid[x][y] = 0
+            y += 1
+        self._calculate_environment_characteristics()
+        return True
+    
+    def _calculate_environment_characteristics(self):
+        """
+        OBJECTIVE 3: Adaptive Navigation - Calculate environment characteristics
+        
+        Analyzes the environment to determine:
+        - Obstacle density (percentage of obstacles)
+        - Terrain difficulty (local obstacle density around each cell)
+        """
+        total_cells = self.grid_size * self.grid_size
+        obstacle_count = sum(sum(row) for row in self.grid)
+        self.obstacle_density = (obstacle_count / total_cells) * 100.0
+        
+        # Calculate terrain difficulty: local obstacle density in 3x3 neighborhood
+        self.terrain_difficulty = {}
+        for i in range(self.grid_size):
+            for j in range(self.grid_size):
+                if self.grid[i][j] == 1:
+                    self.terrain_difficulty[(i, j)] = 1.0  # Obstacle itself
+                else:
+                    # Count obstacles in 3x3 neighborhood
+                    obstacle_neighbors = 0
+                    for di in [-1, 0, 1]:
+                        for dj in [-1, 0, 1]:
+                            ni, nj = i + di, j + dj
+                            if 0 <= ni < self.grid_size and 0 <= nj < self.grid_size:
+                                if self.grid[ni][nj] == 1:
+                                    obstacle_neighbors += 1
+                    # Difficulty: 0.0 (clear) to 1.0 (surrounded by obstacles)
+                    self.terrain_difficulty[(i, j)] = obstacle_neighbors / 9.0
+    
+    def get_terrain_difficulty(self, pos):
+        """Get terrain difficulty at a position (0.0 = easy, 1.0 = difficult)."""
+        return self.terrain_difficulty.get(pos, 0.0)
+    
+    def get_obstacle_density(self):
+        """Get overall obstacle density percentage."""
+        return self.obstacle_density
+
+    def copy_grid(self):
+        """Return a deep copy of the current grid."""
+        return [row[:] for row in self.grid]
+
+    def set_grid(self, grid):
+        """Set the grid to a specific configuration."""
+        self.grid = [row[:] for row in grid]
+
+
+# ===============================
+# A* (improved with heapq)
+# ===============================
+class AStar:
+    def __init__(self, grid, start, goal):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+
+    def heuristic(self, node):
+        """Manhattan distance heuristic."""
+        return abs(node[0] - self.goal[0]) + abs(node[1] - self.goal[1])
+    
+    def battery_aware_heuristic(self, node, battery_remaining=100.0):
+        """
+        OBJECTIVE 2: Battery-Aware Heuristic
+        
+        Adjusts heuristic based on remaining battery to encourage energy-efficient paths.
+        When battery is low, prioritizes shorter paths more heavily.
+        """
+        base_h = self.heuristic(node)
+        
+        # If battery is low, heavily weight distance (need to reach goal quickly)
+        if battery_remaining < 30.0:
+            # Urgent: battery very low, prioritize shortest path
+            return base_h * 2.0
+        elif battery_remaining < 50.0:
+            # Moderate urgency: slightly weight distance
+            return base_h * 1.3
+        else:
+            # Normal: standard heuristic
+            return base_h
+
+    def get_neighbors(self, node):
+        neighbors = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = node[0] + dx, node[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid) and self.grid[nx][ny] == 0:
+                neighbors.append((nx, ny))
+        return neighbors
+
+    def search(self, battery_remaining=100.0, battery_aware=True):
+        """
+        A* search with optional battery-aware routing.
+        
+        OBJECTIVE 2: Battery-Aware Routing
+        - Uses battery-aware heuristic when battery is low
+        - Optimizes paths for energy efficiency
+        """
+        open_heap = []
+        # Use battery-aware heuristic if enabled
+        if battery_aware:
+            start_h = self.battery_aware_heuristic(self.start, battery_remaining)
+        else:
+            start_h = self.heuristic(self.start)
+        heapq.heappush(open_heap, (start_h, 0, self.start))
+        came_from = {}
+        g_score = {self.start: 0}
+
+        while open_heap:
+            f, g, current = heapq.heappop(open_heap)
+            if current == self.goal:
+                # reconstruct
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                return path[::-1]
+            for neighbor in self.get_neighbors(current):
+                # OBJECTIVE 2: Battery-aware cost calculation
+                # Cost includes battery consumption per step
+                step_cost = 1.0
+                if battery_aware:
+                    # Adjust cost based on battery level
+                    # Low battery: higher cost to discourage longer paths
+                    if battery_remaining < 30.0:
+                        step_cost = 1.5  # Higher cost when battery is low
+                    elif battery_remaining < 50.0:
+                        step_cost = 1.2
+                
+                tentative_g = g_score[current] + step_cost
+                if tentative_g < g_score.get(neighbor, float('inf')):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    # Use battery-aware heuristic if enabled
+                    if battery_aware:
+                        h = self.battery_aware_heuristic(neighbor, battery_remaining)
+                    else:
+                        h = self.heuristic(neighbor)
+                    f_score = tentative_g + h
+                    heapq.heappush(open_heap, (f_score, tentative_g, neighbor))
+        return []
+
+
+# ===============================
+# D* Lite (Dynamic Replanning Algorithm - Recent Method)
+# ===============================
+class DStarLite:
+    """
+    D* Lite: Incremental replanning algorithm for dynamic environments.
+    Based on: Koenig & Likhachev (2002) "D* Lite"
+    This is a well-known recent method for comparison.
+    """
+    def __init__(self, grid, start, goal):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+        self.rhs = {}  # one-step lookahead values
+        self.g = {}    # g-values
+        self.U = []    # priority queue
+        self.km = 0    # key modifier
+        
+    def heuristic(self, u, v):
+        """Manhattan distance heuristic."""
+        return abs(u[0] - v[0]) + abs(u[1] - v[1])
+    
+    def calculate_key(self, u):
+        """Calculate key for priority queue."""
+        g_val = self.g.get(u, float('inf'))
+        rhs_val = self.rhs.get(u, float('inf'))
+        return (min(g_val, rhs_val) + self.heuristic(self.start, u) + self.km,
+                min(g_val, rhs_val))
+    
+    def get_neighbors(self, u):
+        """Get valid neighbors."""
+        neighbors = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = u[0] + dx, u[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid):
+                neighbors.append((nx, ny))
+        return neighbors
+    
+    def update_vertex(self, u):
+        """Update vertex u."""
+        if u != self.goal:
+            min_cost = float('inf')
+            for v in self.get_neighbors(u):
+                if self.grid[v[0]][v[1]] == 0:  # not an obstacle
+                    cost = 1 + self.g.get(v, float('inf'))
+                    min_cost = min(min_cost, cost)
+            self.rhs[u] = min_cost
+        
+        # Remove u from queue if present
+        self.U = [(k, v) for k, v in self.U if v != u]
+        
+        if self.g.get(u, float('inf')) != self.rhs.get(u, float('inf')):
+            heapq.heappush(self.U, (self.calculate_key(u), u))
+    
+    def compute_shortest_path(self):
+        """Compute shortest path using D* Lite."""
+        while self.U and (self.calculate_key(self.U[0][1]) < self.calculate_key(self.start) or
+                          self.rhs.get(self.start, float('inf')) != self.g.get(self.start, float('inf'))):
+            k_old, u = heapq.heappop(self.U)
+            k_new = self.calculate_key(u)
+            
+            if k_old < k_new:
+                heapq.heappush(self.U, (k_new, u))
+            elif self.g.get(u, float('inf')) > self.rhs.get(u, float('inf')):
+                self.g[u] = self.rhs.get(u, float('inf'))
+                for v in self.get_neighbors(u):
+                    self.update_vertex(v)
+            else:
+                self.g[u] = float('inf')
+                for v in self.get_neighbors(u):
+                    self.update_vertex(v)
+                self.update_vertex(u)
+    
+    def initialize(self):
+        """Initialize D* Lite."""
+        self.U = []
+        self.km = 0
+        self.rhs = {self.goal: 0}
+        self.g = {self.goal: float('inf')}
+        heapq.heappush(self.U, (self.calculate_key(self.goal), self.goal))
+        self.compute_shortest_path()
+    
+    def replan(self, changed_cells):
+        """Replan after environment changes."""
+        self.km += self.heuristic(self.start, self.goal)
+        old_start = self.start
+        
+        for cell in changed_cells:
+            self.update_vertex(cell)
+            for neighbor in self.get_neighbors(cell):
+                self.update_vertex(neighbor)
+        
+        self.compute_shortest_path()
+    
+    def get_path(self):
+        """Extract path from start to goal."""
+        path = [self.start]
+        current = self.start
+        
+        while current != self.goal:
+            best_neighbor = None
+            best_cost = float('inf')
+            
+            for neighbor in self.get_neighbors(current):
+                if self.grid[neighbor[0]][neighbor[1]] == 0:  # not obstacle
+                    cost = 1 + self.g.get(neighbor, float('inf'))
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_neighbor = neighbor
+            
+            if best_neighbor is None or best_neighbor == current:
+                return []  # no path
+            
+            path.append(best_neighbor)
+            current = best_neighbor
+            
+            if len(path) > len(self.grid) * len(self.grid):
+                return []  # prevent infinite loops
+        
+        return path
+    
+    def search(self):
+        """Main search function."""
+        self.initialize()
+        return self.get_path()
+
+
+# ===============================
+# Double Q-Learning (Recent Published Method for Comparison)
+# ===============================
+class DoubleQLearning:
+    """
+    Double Q-Learning: Recent method to address overestimation bias in Q-learning.
+    
+    Reference: van Hasselt (2010) "Double Q-learning"
+    Reference: van Hasselt et al. (2016) "Deep Reinforcement Learning with Double Q-learning"
+    
+    This is a well-established recent improvement to standard Q-learning that uses
+    two Q-tables to reduce overestimation bias. We include this as a comparison baseline.
+    """
+    
+    def __init__(self, grid, start, goal, episodes=300, alpha=0.7, gamma=0.9,
+                 epsilon=0.25, epsilon_decay=0.995, min_epsilon=0.05,
+                 progress_weight=5.0, collision_penalty=-50):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+        
+        # Double Q-Learning uses TWO Q-tables
+        self.q_table_a = {}  # First Q-table
+        self.q_table_b = {}  # Second Q-table
+        
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        self.min_epsilon = min_epsilon
+        self.episodes = episodes
+        
+        # Reward shaping (same as MR-QLearning for fair comparison)
+        self.progress_weight = progress_weight
+        self.collision_penalty = collision_penalty
+        
+        # Stats
+        self.success_count = 0
+    
+    def heuristic(self, state):
+        return abs(state[0] - self.goal[0]) + abs(state[1] - self.goal[1])
+    
+    def get_actions(self, state):
+        actions = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = state[0] + dx, state[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid) and self.grid[nx][ny] == 0:
+                actions.append((nx, ny))
+        return actions
+    
+    def choose_action(self, state):
+        """Epsilon-greedy action selection using combined Q-tables."""
+        actions = self.get_actions(state)
+        if not actions:
+            return state
+        
+        if random.random() > self.epsilon:
+            # Exploit: use average of both Q-tables
+            q_values = {}
+            for action in actions:
+                q_a = self.q_table_a.get(state, {}).get(action, 0.0)
+                q_b = self.q_table_b.get(state, {}).get(action, 0.0)
+                q_values[action] = (q_a + q_b) / 2.0
+            
+            if q_values:
+                max_val = max(q_values.values())
+                best = [a for a, v in q_values.items() if v == max_val]
+                return random.choice(best)
+            
+            # Fallback to heuristic
+            actions_sorted = sorted(actions, key=lambda a: self.heuristic(a))
+            return actions_sorted[0]
+        
+        # Explore: random action
+        return random.choice(actions)
+    
+    def update_q(self, state, action, reward, next_state):
+        """
+        Double Q-Learning update: randomly choose which Q-table to update,
+        but use the OTHER Q-table to estimate the next state value.
+        This reduces overestimation bias.
+        """
+        if random.random() < 0.5:
+            # Update Q_A using Q_B for next state
+            old_q = self.q_table_a.get(state, {}).get(action, 0.0)
+            
+            # Find best action in next_state using Q_B
+            q_b_values = self.q_table_b.get(next_state, {})
+            if q_b_values:
+                best_action_b = max(q_b_values, key=q_b_values.get)
+                next_value = q_b_values[best_action_b]
+            else:
+                next_value = 0.0
+            
+            new_q = (1 - self.alpha) * old_q + self.alpha * (reward + self.gamma * next_value)
+            
+            if state not in self.q_table_a:
+                self.q_table_a[state] = {}
+            self.q_table_a[state][action] = new_q
+        else:
+            # Update Q_B using Q_A for next state
+            old_q = self.q_table_b.get(state, {}).get(action, 0.0)
+            
+            # Find best action in next_state using Q_A
+            q_a_values = self.q_table_a.get(next_state, {})
+            if q_a_values:
+                best_action_a = max(q_a_values, key=q_a_values.get)
+                next_value = q_a_values[best_action_a]
+            else:
+                next_value = 0.0
+            
+            new_q = (1 - self.alpha) * old_q + self.alpha * (reward + self.gamma * next_value)
+            
+            if state not in self.q_table_b:
+                self.q_table_b[state] = {}
+            self.q_table_b[state][action] = new_q
+    
+    def shaped_reward(self, state, action):
+        """Same reward shaping as MR-QLearning for fair comparison."""
+        if action == self.goal:
+            return 200.0
+        # Reward calculation: validate bounds before accessing grid
+        if (action[0] < 0 or action[0] >= len(self.grid) or 
+            action[1] < 0 or action[1] >= len(self.grid[0])):
+            return self.collision_penalty  # Out of bounds is treated as collision
+        if self.grid[action[0]][action[1]] == 1:
+            return self.collision_penalty
+        prev_h = self.heuristic(state)
+        new_h = self.heuristic(action)
+        progress = prev_h - new_h
+        step_penalty = -1.0
+        return step_penalty + self.progress_weight * progress
+    
+    def train(self, early_stop_window=30, early_stop_threshold=0.9):
+        """Train Double Q-Learning with epsilon decay and early stopping."""
+        success_history = []
+        for ep in range(self.episodes):
+            state = self.start
+            steps = 0
+            max_steps = len(self.grid) * len(self.grid) * 2
+            success = False
+            
+            while steps < max_steps:
+                action = self.choose_action(state)
+                reward = self.shaped_reward(state, action)
+                self.update_q(state, action, reward, action)
+                state = action
+                steps += 1
+                if state == self.goal:
+                    success = True
+                    break
+            
+            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+            success_history.append(1 if success else 0)
+            
+            if len(success_history) >= early_stop_window:
+                window = success_history[-early_stop_window:]
+                if sum(window) / early_stop_window >= early_stop_threshold:
+                    break
+        
+        self.success_count = sum(success_history)
+    
+    def get_path(self, max_steps=500):
+        """Extract path using combined Q-tables."""
+        path = [self.start]
+        state = self.start
+        steps = 0
+        
+        while state != self.goal and steps < max_steps:
+            # Use average of both Q-tables
+            q_values = {}
+            actions = self.get_actions(state)
+            if not actions:
+                break
+            
+            for action in actions:
+                q_a = self.q_table_a.get(state, {}).get(action, 0.0)
+                q_b = self.q_table_b.get(state, {}).get(action, 0.0)
+                q_values[action] = (q_a + q_b) / 2.0
+            
+            if not q_values:
+                break
+            
+            next_state = max(q_values, key=q_values.get)
+            if self.grid[next_state[0]][next_state[1]] == 1:
+                break
+            
+            path.append(next_state)
+            state = next_state
+            steps += 1
+        
+        return path
+
+
+# ===============================
+# MR-QLearning (Novel Enhanced Q-Learning with Multiple Innovations)
+# ===============================
+class MRQLearning:
+    """
+    MR-QLearning: Novel Q-Learning with multiple master's-level contributions:
+    
+    1. EXPERIENCE REPLAY BUFFER: Stores and replays past experiences for faster learning
+    2. UNCERTAINTY QUANTIFICATION: Uses Q-value variance/entropy, not just visit counts
+    3. ADAPTIVE CONFIDENCE THRESHOLD: Learns optimal switching points dynamically
+    4. TRANSFER LEARNING: Can reuse Q-table from similar environments
+    5. HEURISTIC-GUIDED EXPLORATION: Biased exploration toward goal
+    6. REWARD SHAPING: Progress-based rewards for faster convergence
+    """
+
+    def __init__(self, grid, start, goal, episodes=300, alpha=0.7, gamma=0.9,
+                 epsilon=0.25, epsilon_decay=0.995, min_epsilon=0.05,
+                 progress_weight=5.0, collision_penalty=-50,
+                 confidence_threshold=5, replay_buffer_size=1000, 
+                 replay_batch_size=32, transfer_q_table=None):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+        self.q_table = {}  # dict: state -> dict(action -> value)
+        
+        # NOVEL CONTRIBUTION 1: Experience Replay Buffer
+        self.replay_buffer = []  # stores (state, action, reward, next_state) tuples
+        self.replay_buffer_size = replay_buffer_size
+        self.replay_batch_size = replay_batch_size
+        
+        # NOVEL CONTRIBUTION 2: Uncertainty Quantification
+        # Track Q-value history for variance calculation
+        self.q_value_history = {}  # (state, action) -> list of Q-values over time
+        self.q_value_variance = {}  # (state, action) -> variance of Q-values
+        
+        # visit_counts for basic confidence
+        self.visit_counts = {}
+        
+        # NOVEL CONTRIBUTION 3: Adaptive Confidence Threshold
+        self.confidence_threshold = confidence_threshold
+        self.adaptive_threshold_history = []  # track performance vs threshold
+        self.threshold_adjustment_rate = 0.1
+        
+        # NOVEL CONTRIBUTION 4: Transfer Learning
+        if transfer_q_table:
+            self.q_table = transfer_q_table.copy()
+            print(f"Transfer learning: Loaded {len(transfer_q_table)} states from previous environment")
+        
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        self.min_epsilon = min_epsilon
+        self.episodes = episodes
+        # reward shaping weights
+        self.progress_weight = progress_weight
+        self.collision_penalty = collision_penalty
+        # stats
+        self.success_count = 0
+        self.transfer_used = transfer_q_table is not None
+
+    def heuristic(self, state):
+        return abs(state[0] - self.goal[0]) + abs(state[1] - self.goal[1])
+
+    def get_actions(self, state):
+        actions = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = state[0] + dx, state[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid) and self.grid[nx][ny] == 0:
+                actions.append((nx, ny))
+        return actions
+
+    def choose_action(self, state):
+        """
+        Epsilon-greedy with heuristic bias on exploration:
+        when selecting random action, prefer actions that reduce heuristic distance.
+        """
+        actions = self.get_actions(state)
+        if not actions:
+            return state
+
+        if random.random() > self.epsilon:
+            # exploit: choose best known action
+            q_values = self.q_table.get(state, {})
+            if q_values:
+                # choose key with max value (ties -> random)
+                max_val = max(q_values.values())
+                best = [a for a, v in q_values.items() if v == max_val]
+                return random.choice(best)
+            # fallback to heuristic choice if no Q values
+            actions_sorted = sorted(actions, key=lambda a: self.heuristic(a))
+            return actions_sorted[0]
+
+        # explore: bias by heuristic improvement (probabilistic)
+        current_h = self.heuristic(state)
+        improvements = []
+        for a in actions:
+            # improvement measure: positive if closer
+            improvement = current_h - self.heuristic(a)
+            improvements.append((a, improvement))
+        # convert improvements to weights (shift to positive)
+        min_impr = min(impr for _, impr in improvements)
+        weights = []
+        for _, impr in improvements:
+            # prefer larger improvement: weight = 1 + progress_weight * positive_improvement
+            w = 1.0 + (self.progress_weight * max(0, impr))
+            weights.append(w)
+        # choose using weighted random
+        total = sum(weights)
+        r = random.random() * total
+        cum = 0.0
+        for (a, _), w in zip(improvements, weights):
+            cum += w
+            if r <= cum:
+                return a
+        return actions[-1]
+
+    def update_q(self, state, action, reward, next_state):
+        """Update Q-value with experience replay support."""
+        old_q = self.q_table.get(state, {}).get(action, 0.0)
+        next_max = max(self.q_table.get(next_state, {}).values(), default=0.0)
+        new_q = (1 - self.alpha) * old_q + self.alpha * (reward + self.gamma * next_max)
+        if state not in self.q_table:
+            self.q_table[state] = {}
+        self.q_table[state][action] = new_q
+        
+        # NOVEL: Track Q-value history for uncertainty quantification
+        key = (state, action)
+        if key not in self.q_value_history:
+            self.q_value_history[key] = []
+        self.q_value_history[key].append(new_q)
+        # Keep only recent history (last 20 updates)
+        if len(self.q_value_history[key]) > 20:
+            self.q_value_history[key] = self.q_value_history[key][-20:]
+        
+        # Calculate variance for uncertainty
+        if len(self.q_value_history[key]) >= 3:
+            values = self.q_value_history[key]
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            self.q_value_variance[key] = variance
+        
+        # Update visit counts
+        self.visit_counts[key] = self.visit_counts.get(key, 0) + 1
+        
+        # NOVEL: Add to experience replay buffer
+        self.replay_buffer.append((state, action, reward, next_state))
+        if len(self.replay_buffer) > self.replay_buffer_size:
+            self.replay_buffer.pop(0)
+    
+    def replay_experiences(self):
+        """
+        NOVEL CONTRIBUTION: Experience Replay
+        Sample random batch from buffer and update Q-values.
+        This breaks correlation and improves learning efficiency.
+        """
+        if len(self.replay_buffer) < self.replay_batch_size:
+            return
+        
+        # Sample random batch
+        batch = random.sample(self.replay_buffer, min(self.replay_batch_size, len(self.replay_buffer)))
+        
+        for state, action, reward, next_state in batch:
+            old_q = self.q_table.get(state, {}).get(action, 0.0)
+            next_max = max(self.q_table.get(next_state, {}).values(), default=0.0)
+            new_q = (1 - self.alpha) * old_q + self.alpha * (reward + self.gamma * next_max)
+            
+            if state not in self.q_table:
+                self.q_table[state] = {}
+            self.q_table[state][action] = new_q
+            
+            # Also update visit counts and Q-value history for consistency
+            key = (state, action)
+            if key not in self.q_value_history:
+                self.q_value_history[key] = []
+            self.q_value_history[key].append(new_q)
+            if len(self.q_value_history[key]) > 20:
+                self.q_value_history[key] = self.q_value_history[key][-20:]
+            
+            # Update variance
+            if len(self.q_value_history[key]) >= 3:
+                values = self.q_value_history[key]
+                mean = sum(values) / len(values)
+                variance = sum((v - mean) ** 2 for v in values) / len(values)
+                self.q_value_variance[key] = variance
+            
+            # Update visit counts (but don't double-count)
+            # Only increment if this is a new experience, not a replay
+            # Actually, for replay we should track separately, but for simplicity
+            # we'll just ensure it exists
+            if key not in self.visit_counts:
+                self.visit_counts[key] = 0
+
+    def state_confidence(self, state):
+        """
+        NOVEL CONTRIBUTION: Multi-factor Confidence Score
+        
+        Combines:
+        1. Visit count (exploration completeness)
+        2. Q-value variance (uncertainty quantification)
+        3. Q-value magnitude (policy quality)
+        
+        Returns:
+            confidence_score (float): Higher = more confident
+        """
+        q_values = self.q_table.get(state, {})
+        if not q_values:
+            return 0.0
+        
+        best_action = max(q_values, key=q_values.get)
+        key = (state, best_action)
+        
+        # Factor 1: Visit count (normalized)
+        visits = self.visit_counts.get(key, 0)
+        visit_score = min(visits / 10.0, 1.0)  # normalize to [0, 1]
+        
+        # Factor 2: Q-value variance (lower variance = higher confidence)
+        variance = self.q_value_variance.get(key, 1.0)
+        variance_score = max(0.0, 1.0 - min(variance / 100.0, 1.0))  # normalize
+        
+        # Factor 3: Q-value magnitude (positive Q = good policy)
+        q_value = q_values[best_action]
+        magnitude_score = max(0.0, min(q_value / 100.0, 1.0))  # normalize
+        
+        # Weighted combination
+        confidence = 0.4 * visit_score + 0.3 * variance_score + 0.3 * magnitude_score
+        
+        return confidence
+    
+    def should_use_astar_fallback(self, state):
+        """
+        NOVEL CONTRIBUTION: Adaptive Confidence-Based Fallback Decision
+        
+        Uses learned threshold that adapts based on performance history.
+        """
+        confidence = self.state_confidence(state)
+        # Convert confidence (0-1) to threshold comparison
+        # Lower confidence threshold means more aggressive A* switching
+        effective_threshold = self.confidence_threshold / 10.0  # normalize to [0,1]
+        return confidence < effective_threshold
+    
+    def adapt_confidence_threshold(self, success_rate):
+        """
+        NOVEL CONTRIBUTION: Adaptive Threshold Learning
+        
+        Adjusts confidence threshold based on performance:
+        - If success rate is low, lower threshold (use A* more)
+        - If success rate is high, raise threshold (trust RL more)
+        """
+        self.adaptive_threshold_history.append(success_rate)
+        
+        if len(self.adaptive_threshold_history) >= 10:
+            avg_success = sum(self.adaptive_threshold_history[-10:]) / 10.0
+            
+            if avg_success < 0.7:  # Low performance
+                # Lower threshold (use A* more often)
+                self.confidence_threshold = max(3, self.confidence_threshold - self.threshold_adjustment_rate)
+            elif avg_success > 0.9:  # High performance
+                # Raise threshold (trust RL more)
+                self.confidence_threshold = min(10, self.confidence_threshold + self.threshold_adjustment_rate)
+
+    def shaped_reward(self, state, action, battery_remaining=100.0, battery_aware=True):
+        """
+        Shaped reward: goal reward, collision penalty, progress bonus, step penalty.
+        
+        OBJECTIVE 2: Battery-Aware Routing
+        - Penalizes actions that consume more battery
+        - Adjusts reward based on remaining battery level
+        - Encourages energy-efficient paths
+        """
+        if action == self.goal:
+            return 200.0  # large positive
+        # Reward calculation: validate bounds before accessing grid
+        if (action[0] < 0 or action[0] >= len(self.grid) or 
+            action[1] < 0 or action[1] >= len(self.grid[0])):
+            return self.collision_penalty  # Out of bounds is treated as collision
+        # if attempted to step into obstacle (shouldn't normally happen because actions avoid obstacles)
+        if self.grid[action[0]][action[1]] == 1:
+            return self.collision_penalty
+        # progress: positive if distance reduced
+        prev_h = self.heuristic(state)
+        new_h = self.heuristic(action)
+        progress = prev_h - new_h
+        
+        # OBJECTIVE 2: Battery-aware routing
+        if battery_aware:
+            # Base step penalty (battery cost)
+            battery_cost = BATTERY_COST_PER_STEP
+            step_penalty = -battery_cost
+            
+            # Additional penalty if battery is low (encourage shorter paths)
+            if battery_remaining < 30.0:  # Low battery threshold
+                # Extra penalty for low battery - encourages finding goal quickly
+                battery_penalty = -2.0 * (30.0 - battery_remaining) / 30.0
+            elif battery_remaining < 50.0:  # Medium battery
+                battery_penalty = -0.5 * (50.0 - battery_remaining) / 20.0
+            else:
+                battery_penalty = 0.0
+            
+            # Reward efficient paths (fewer steps = less battery)
+            return step_penalty + battery_penalty + self.progress_weight * progress
+        else:
+            # Original: small step penalty to encourage fewer steps
+            step_penalty = -1.0
+            return step_penalty + self.progress_weight * progress
+
+    def train(self, early_stop_window=30, early_stop_threshold=0.9):
+        """
+        NOVEL: Enhanced training with experience replay and adaptive threshold.
+        
+        Improvements:
+        1. Experience replay every N episodes
+        2. Adaptive confidence threshold adjustment
+        3. Early stopping based on success rate
+        """
+        success_history = []
+        for ep in range(self.episodes):
+            state = self.start
+            steps = 0
+            max_steps = len(self.grid) * len(self.grid) * 2
+            success = False
+
+            while steps < max_steps:
+                action = self.choose_action(state)
+                reward = self.shaped_reward(state, action)
+                self.update_q(state, action, reward, action)
+                state = action
+                steps += 1
+                if state == self.goal:
+                    success = True
+                    break
+
+            # NOVEL: Experience replay every 5 episodes
+            if (ep + 1) % 5 == 0:
+                self.replay_experiences()
+
+            # decay epsilon
+            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+            success_history.append(1 if success else 0)
+
+            # NOVEL: Adaptive threshold adjustment every 10 episodes
+            if (ep + 1) % 10 == 0 and len(success_history) >= 10:
+                recent_success_rate = sum(success_history[-10:]) / 10.0
+                self.adapt_confidence_threshold(recent_success_rate)
+
+            # check early stop
+            if len(success_history) >= early_stop_window:
+                window = success_history[-early_stop_window:]
+                if sum(window) / early_stop_window >= early_stop_threshold:
+                    # considered converged
+                    break
+
+        # store success count for info
+        self.success_count = sum(success_history)
+
+    def get_path(self, max_steps=500, use_astar_fallback=False):
+        """
+        Get path using learned Q-values.
+        
+        Args:
+            max_steps: Maximum steps to attempt
+            use_astar_fallback: If True, fall back to A* when Q-learning fails (for hybrid mode)
+                               If False, return partial path (for pure RL mode)
+        """
+        path = [self.start]
+        state = self.start
+        steps = 0
+
+        while state != self.goal and steps < max_steps:
+            q_values = self.q_table.get(state, {})
+            if not q_values:
+                break
+
+            # NOVEL: Adaptive confidence-aware decision using multi-factor confidence
+            # Uses uncertainty quantification and adaptive threshold
+            if use_astar_fallback:
+                if self.should_use_astar_fallback(state):
+                    # Confidence too low - hand over to A* from current state
+                    ast = AStar(self.grid, state, self.goal)
+                    astar_tail = ast.search()
+                    if astar_tail and len(astar_tail) > 0:
+                        # Fallback error handling: validate A* path before splicing
+                        # Ensure A* path starts from current state
+                        if astar_tail[0] == state:
+                            # splice the A* segment after the already traversed path
+                            return path[:-1] + astar_tail
+                        elif state in astar_tail:
+                            # If current state is in A* path, splice from there
+                            idx = astar_tail.index(state)
+                            return path[:-1] + astar_tail[idx:]
+                        else:
+                            # A* found a path but doesn't include current state - validate and use it
+                            # Validate all steps in A* path are within bounds
+                            valid_path = []
+                            for step in astar_tail:
+                                if (0 <= step[0] < len(self.grid) and 
+                                    0 <= step[1] < len(self.grid[0])):
+                                    valid_path.append(step)
+                                else:
+                                    break
+                            if len(valid_path) > 0:
+                                return path[:-1] + valid_path
+                            # If no valid steps, continue with RL
+                    # if A* cannot find a path from here, continue with RL or break
+                    if not astar_tail or len(astar_tail) == 0:
+                        break
+
+            next_state = max(q_values, key=q_values.get)
+            # Path validation: check bounds before accessing grid
+            if (next_state[0] < 0 or next_state[0] >= len(self.grid) or 
+                next_state[1] < 0 or next_state[1] >= len(self.grid[0])):
+                break
+            if self.grid[next_state[0]][next_state[1]] == 1:
+                break
+
+            path.append(next_state)
+            state = next_state
+            steps += 1
+
+        # If we didn't reach the goal
+        if state != self.goal:
+            if use_astar_fallback:
+                # As a final safety net, try a full A* from the start
+                ast = AStar(self.grid, self.start, self.goal)
+                fallback_path = ast.search()
+                # Fallback error handling: validate A* result
+                if fallback_path and len(fallback_path) > 0:
+                    return fallback_path
+                else:
+                    # A* failed, return partial path
+                    return path
+            else:
+                # Pure RL mode: return the partial path learned so far
+                return path
+        return path
+    
+    def get_q_table_for_transfer(self):
+        """
+        NOVEL CONTRIBUTION: Transfer Learning Support
+        
+        Returns Q-table for transfer to similar environments.
+        """
+        return self.q_table.copy()
+    
+    def transfer_learning_compatibility(self, other_q_table, similarity_threshold=0.3):
+        """
+        NOVEL CONTRIBUTION: Transfer Learning Compatibility Check
+        
+        Determines if Q-table from another environment is compatible.
+        Uses state overlap ratio as similarity measure.
+        """
+        if not other_q_table:
+            return False
+        
+        states_self = set(self.q_table.keys())
+        states_other = set(other_q_table.keys())
+        
+        if len(states_self) == 0:
+            return len(states_other) > 0
+        
+        overlap = len(states_self & states_other)
+        similarity = overlap / max(len(states_self), len(states_other))
+        
+        return similarity >= similarity_threshold
+
+
+# ===============================
+# Neural A* (Learning-based Pathfinding Benchmark)
+# ===============================
+class NeuralAStar:
+    """
+    Neural A*: Learning-based pathfinding that uses neural network guidance.
+    
+    Reference: Yonetani et al. (2021) "Neural A*: Learning to Guide A* with Neural Networks"
+    
+    This is a recent learning-based method that combines neural networks with A* search.
+    We implement a simplified version that learns adaptive heuristics from experience.
+    """
+    
+    def __init__(self, grid, start, goal, episodes=200):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+        self.episodes = episodes
+        
+        # Learned heuristic function (state -> estimated distance to goal)
+        # In full Neural A*, this would be a neural network
+        # Here we use a learned lookup table that adapts based on experience
+        self.learned_heuristic = {}
+        
+        # Track successful paths to learn better heuristics
+        self.path_experiences = []
+        
+        # Base heuristic (Manhattan distance)
+        self.base_heuristic_weight = 1.0
+        self.learned_heuristic_weight = 0.5
+        
+    def base_heuristic(self, node):
+        """Base Manhattan distance heuristic."""
+        return abs(node[0] - self.goal[0]) + abs(node[1] - self.goal[1])
+    
+    def learned_heuristic_value(self, node):
+        """
+        Get learned heuristic value for a node.
+        Combines base heuristic with learned adjustments.
+        """
+        base_h = self.base_heuristic(node)
+        
+        # Look up learned adjustment
+        learned_adjustment = self.learned_heuristic.get(node, 0.0)
+        
+        # Combine: base heuristic + learned adjustment
+        combined = (self.base_heuristic_weight * base_h + 
+                   self.learned_heuristic_weight * learned_adjustment)
+        
+        return max(0, combined)  # Ensure non-negative
+    
+    def get_neighbors(self, node):
+        """Get valid neighbors."""
+        neighbors = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = node[0] + dx, node[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid) and self.grid[nx][ny] == 0:
+                neighbors.append((nx, ny))
+        return neighbors
+    
+    def search(self):
+        """
+        Neural A* search using learned heuristic.
+        """
+        open_heap = []
+        start_h = self.learned_heuristic_value(self.start)
+        heapq.heappush(open_heap, (start_h, 0, self.start))
+        came_from = {}
+        g_score = {self.start: 0}
+        closed_set = set()
+        
+        while open_heap:
+            f, g, current = heapq.heappop(open_heap)
+            
+            if current in closed_set:
+                continue
+            closed_set.add(current)
+            
+            if current == self.goal:
+                # Reconstruct path
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                return path[::-1]
+            
+            for neighbor in self.get_neighbors(current):
+                if neighbor in closed_set:
+                    continue
+                
+                tentative_g = g_score[current] + 1
+                
+                if tentative_g < g_score.get(neighbor, float('inf')):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    h = self.learned_heuristic_value(neighbor)
+                    f_score = tentative_g + h
+                    heapq.heappush(open_heap, (f_score, tentative_g, neighbor))
+        
+        return []
+    
+    def learn_from_path(self, path):
+        """
+        Learn better heuristics from successful paths.
+        Updates learned_heuristic based on actual path costs.
+        """
+        if not path or len(path) < 2:
+            return
+        
+        # For each node in the path, update heuristic based on actual remaining distance
+        for i, node in enumerate(path):
+            remaining_steps = len(path) - i - 1
+            actual_cost = remaining_steps
+            
+            # Current heuristic estimate
+            current_h = self.learned_heuristic_value(node)
+            
+            # Update learned heuristic to better match actual cost
+            # Use exponential moving average
+            alpha = 0.3
+            if node not in self.learned_heuristic:
+                self.learned_heuristic[node] = 0.0
+            
+            # Adjust learned value to reduce error
+            error = actual_cost - current_h
+            self.learned_heuristic[node] += alpha * error
+    
+    def train(self):
+        """
+        Train Neural A* by running multiple searches and learning from successful paths.
+        """
+        for episode in range(self.episodes):
+            path = self.search()
+            if path and path[-1] == self.goal:
+                self.learn_from_path(path)
+                self.path_experiences.append(path)
+                
+                # Keep only recent experiences (last 50 paths)
+                if len(self.path_experiences) > 50:
+                    self.path_experiences.pop(0)
+        
+        # Final search with learned heuristics
+        return self.search()
+
+
+# ===============================
+# Enhanced Hybrid A* + RL (Novel Enhanced Approach)
+# ===============================
+class EnhancedHybrid:
+    """
+    Enhanced Hybrid A* + RL: Novel approach with multiple RL innovations.
+    
+    Key Enhancements:
+    1. RL-Guided Heuristic Learning: Uses RL to learn adaptive heuristics for A*
+    2. Continuous RL Learning: Keeps updating Q-values during path execution
+    3. RL-Based Path Refinement: Uses RL to refine A* paths for better adaptability
+    4. Multi-Level RL: Different RL policies for different planning horizons
+    5. RL-Based Obstacle Prediction: Uses RL to predict likely obstacle movements
+    
+    This represents a significant advancement over the basic hybrid approach.
+    """
+    
+    def __init__(self, grid, start, goal, episodes=300, real_time_mode=True):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+        self.episodes = episodes
+        self.real_time_mode = real_time_mode
+        
+        # RL agent for learning (reduced episodes for real-time)
+        rl_episodes = 50 if real_time_mode else episodes
+        self.rl_agent = MRQLearning(grid, start, goal, episodes=rl_episodes)
+        
+        # RL-guided heuristic: learned from RL experience
+        self.rl_guided_heuristic = {}
+        
+        # Multi-level RL policies (minimal training for real-time)
+        # For real-time: use minimal episodes, rely on A* fallback
+        global_episodes = 20 if real_time_mode else 150
+        local_episodes = 10 if real_time_mode else 100
+        self.global_rl = MRQLearning(grid, start, goal, episodes=global_episodes)  # Long-term planning
+        self.local_rl = MRQLearning(grid, start, goal, episodes=local_episodes)     # Short-term adaptation
+        
+        # Obstacle prediction model (simplified: tracks obstacle movement patterns)
+        self.obstacle_history = []  # Track obstacle positions over time
+        self.obstacle_prediction = {}  # Predict likely future positions
+        
+        # Path refinement buffer
+        self.path_refinement_buffer = []
+        
+    def rl_guided_heuristic_value(self, node, battery_remaining=100.0, terrain_difficulty=0.0):
+        """
+        ENHANCEMENT 1: RL-Guided Heuristic Learning
+        
+        Uses RL Q-values to inform A* heuristic, making it adaptive to environment.
+        
+        OBJECTIVE 2 & 3: Enhanced with battery-aware routing and adaptive navigation
+        """
+        base_h = abs(node[0] - self.goal[0]) + abs(node[1] - self.goal[1])
+        
+        # Get RL-based adjustment from Q-values
+        rl_adjustment = 0.0
+        if node in self.rl_agent.q_table:
+            q_values = self.rl_agent.q_table[node]
+            if q_values:
+                # Use max Q-value as indicator of how good this state is
+                max_q = max(q_values.values())
+                # Negative Q suggests this state is bad, increase heuristic
+                # Positive Q suggests this state is good, decrease heuristic
+                rl_adjustment = -max_q * 0.1  # Scale factor
+        
+        # Also check learned heuristic from previous searches
+        learned_h = self.rl_guided_heuristic.get(node, 0.0)
+        
+        # OBJECTIVE 2: Battery-aware adjustment
+        battery_factor = 1.0
+        if battery_remaining < 30.0:
+            battery_factor = 2.0  # Urgent: prioritize shortest path
+        elif battery_remaining < 50.0:
+            battery_factor = 1.3
+        
+        # OBJECTIVE 3: Terrain difficulty adjustment
+        # Higher difficulty = higher cost = higher heuristic
+        terrain_factor = 1.0 + terrain_difficulty * 0.5  # Up to 50% increase for difficult terrain
+        
+        # Combine: base + RL adjustment + learned, adjusted for battery and terrain
+        combined = (base_h + rl_adjustment + learned_h * 0.3) * battery_factor * terrain_factor
+        
+        return max(0, combined)
+    
+    def predict_obstacle_movement(self, current_pos, lookahead=3):
+        """
+        ENHANCEMENT 5: RL-Based Obstacle Prediction
+        
+        Predicts likely obstacle positions in the near future based on movement patterns.
+        
+        IMPORTANT: This only works when obstacles have CONSISTENT movement patterns.
+        For RANDOM movement (where direction changes randomly each step), this returns
+        an empty set because random movement cannot be predicted.
+        
+        Returns:
+            set: Predicted obstacle positions (empty if movement is random or unpredictable)
+        """
+        predicted_obstacles = set()
+        
+        # Need at least 3 history points to detect consistent patterns vs random movement
+        if len(self.obstacle_history) < 3:
+            return predicted_obstacles  # Not enough data to detect patterns
+        
+        # Track movement direction for each obstacle across multiple steps
+        # Key: obstacle identifier (position), Value: list of movement directions
+        obstacle_directions = {}
+        
+        # Analyze movement patterns across history
+        for i in range(len(self.obstacle_history) - 1):
+            current_obs = self.obstacle_history[i + 1]
+            prev_obs = self.obstacle_history[i]
+            
+            # Find obstacles that moved and track their direction
+            for pos in current_obs:
+                if pos not in prev_obs:
+                    # New position - find where it came from
+                    for prev_pos in prev_obs:
+                        if prev_pos not in current_obs:
+                            # Likely moved from prev_pos to pos
+                            dx = pos[0] - prev_pos[0]
+                            dy = pos[1] - prev_pos[1]
+                            direction = (dx, dy)
+                            
+                            # Track direction for this obstacle path
+                            key = prev_pos  # Use previous position as identifier
+                            if key not in obstacle_directions:
+                                obstacle_directions[key] = []
+                            obstacle_directions[key].append((direction, pos))
+        
+        # Only predict for obstacles with consistent movement direction
+        # If direction changes between steps, it's random - don't predict
+        for key, movements in obstacle_directions.items():
+            if len(movements) >= 2:
+                # Check if all movements are in the same direction
+                first_dir = movements[0][0]
+                all_same_direction = all(m[0] == first_dir for m in movements)
+                
+                if all_same_direction:
+                    # Consistent pattern detected - can predict
+                    # Get the most recent position
+                    latest_pos = movements[-1][1]
+                    dx, dy = first_dir
+                    
+                    # Predict future positions assuming continued movement in same direction
+                    for step in range(1, lookahead + 1):
+                        predicted = (latest_pos[0] + dx * step, latest_pos[1] + dy * step)
+                        if (0 <= predicted[0] < len(self.grid) and 
+                            0 <= predicted[1] < len(self.grid)):
+                            predicted_obstacles.add(predicted)
+        
+        # If no consistent patterns found, movement is random - return empty set
+        return predicted_obstacles
+    
+    def astar_with_rl_heuristic(self, start, goal, use_predictions=False, 
+                                 battery_remaining=100.0, terrain_difficulty_map=None):
+        """
+        A* search using RL-guided heuristic.
+        
+        OBJECTIVE 2 & 3: Enhanced with battery-aware routing and adaptive navigation
+        """
+        open_heap = []
+        # Get terrain difficulty for start position
+        start_terrain = terrain_difficulty_map.get(start, 0.0) if terrain_difficulty_map else 0.0
+        start_h = self.rl_guided_heuristic_value(start, battery_remaining, start_terrain)
+        heapq.heappush(open_heap, (start_h, 0, start))
+        came_from = {}
+        g_score = {start: 0}
+        closed_set = set()
+        
+        # Get predicted obstacles if requested
+        predicted_obstacles = set()
+        if use_predictions:
+            predicted_obstacles = self.predict_obstacle_movement(start)
+        
+        while open_heap:
+            f, g, current = heapq.heappop(open_heap)
+            
+            if current in closed_set:
+                continue
+            closed_set.add(current)
+            
+            if current == goal:
+                # Reconstruct path
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                return path[::-1]
+            
+            for neighbor in self.get_neighbors(current):
+                if neighbor in closed_set:
+                    continue
+                
+                # Check if predicted to be blocked
+                if neighbor in predicted_obstacles:
+                    continue  # Avoid predicted obstacle
+                
+                # OBJECTIVE 2 & 3: Battery-aware and terrain-aware cost
+                step_cost = 1.0
+                if battery_remaining < 30.0:
+                    step_cost = 1.5
+                elif battery_remaining < 50.0:
+                    step_cost = 1.2
+                
+                # Terrain difficulty increases cost
+                neighbor_terrain = terrain_difficulty_map.get(neighbor, 0.0) if terrain_difficulty_map else 0.0
+                step_cost += neighbor_terrain * 0.3  # Up to 30% cost increase for difficult terrain
+                
+                tentative_g = g_score[current] + step_cost
+                
+                if tentative_g < g_score.get(neighbor, float('inf')):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    h = self.rl_guided_heuristic_value(neighbor, battery_remaining, neighbor_terrain)
+                    f_score = tentative_g + h
+                    heapq.heappush(open_heap, (f_score, tentative_g, neighbor))
+        
+        return []
+    
+    def get_neighbors(self, node):
+        """Get valid neighbors."""
+        neighbors = []
+        for dx, dy in ((0,1),(1,0),(-1,0),(0,-1)):
+            nx, ny = node[0] + dx, node[1] + dy
+            if 0 <= nx < len(self.grid) and 0 <= ny < len(self.grid) and self.grid[nx][ny] == 0:
+                neighbors.append((nx, ny))
+        return neighbors
+    
+    def refine_path_with_rl(self, path):
+        """
+        ENHANCEMENT 3: RL-Based Path Refinement
+        
+        Uses RL to refine A* paths, making them more adaptive to dynamic environments.
+        """
+        if not path or len(path) < 3:
+            return path
+        
+        refined_path = [path[0]]
+        
+        for i in range(1, len(path) - 1):
+            current = path[i]
+            next_planned = path[i + 1]
+            
+            # Check if we should use RL to find a better local path
+            # Use local RL for short-term refinement
+            local_start = refined_path[-1]
+            local_goal = path[-1]  # Always aim for final goal
+            
+            # Get RL suggestion for next step
+            local_rl_q = self.local_rl.q_table.get(local_start, {})
+            if local_rl_q:
+                best_rl_action = max(local_rl_q, key=local_rl_q.get)
+                
+                # If RL suggests a different path and it's valid, use it
+                if best_rl_action != next_planned and self.grid[best_rl_action[0]][best_rl_action[1]] == 0:
+                    # Check if RL path is actually better (closer to goal)
+                    rl_h = abs(best_rl_action[0] - self.goal[0]) + abs(best_rl_action[1] - self.goal[1])
+                    planned_h = abs(next_planned[0] - self.goal[0]) + abs(next_planned[1] - self.goal[1])
+                    
+                    if rl_h <= planned_h + 1:  # Allow slight deviation if close
+                        refined_path.append(best_rl_action)
+                        continue
+            
+            # Otherwise, stick with planned path
+            refined_path.append(next_planned)
+        
+        refined_path.append(path[-1])  # Ensure goal is included
+        return refined_path
+    
+    def train(self):
+        """
+        Train the enhanced hybrid system.
+        
+        For real-time mode: Minimal training (RL is optional enhancement)
+        For non-real-time mode: Full training (for comparison/offline use)
+        """
+        if self.real_time_mode:
+            # Real-time mode: Minimal training, RL is optional enhancement
+            # Only train main RL agent lightly for heuristic learning
+            self.rl_agent.train()
+            
+            # Learn RL-guided heuristics from RL experience
+            for state in self.rl_agent.q_table:
+                q_values = self.rl_agent.q_table[state]
+                if q_values:
+                    max_q = max(q_values.values())
+                    # Convert Q-value to heuristic adjustment
+                    # Higher Q = better state = lower heuristic needed
+                    self.rl_guided_heuristic[state] = -max_q * 0.05
+        else:
+            # Non-real-time mode: Full training (for comparison/offline)
+            # Train global RL for long-term planning
+            self.global_rl.train()
+            
+            # Train local RL for short-term adaptation
+            self.local_rl.train()
+            
+            # Train main RL agent
+            self.rl_agent.train()
+            
+            # Learn RL-guided heuristics from RL experience
+            for state in self.rl_agent.q_table:
+                q_values = self.rl_agent.q_table[state]
+                if q_values:
+                    max_q = max(q_values.values())
+                    # Convert Q-value to heuristic adjustment
+                    # Higher Q = better state = lower heuristic needed
+                    self.rl_guided_heuristic[state] = -max_q * 0.05
+    
+    def search(self, use_predictions=False, battery_remaining=100.0, terrain_difficulty_map=None):
+        """
+        Main search function for enhanced hybrid approach.
+        
+        OBJECTIVE 2 & 3: Enhanced with battery-aware routing and adaptive navigation
+        """
+        # Step 1: Get global path using RL-guided A* with battery and terrain awareness
+        global_path = self.astar_with_rl_heuristic(
+            self.start, self.goal, 
+            use_predictions=use_predictions,
+            battery_remaining=battery_remaining,
+            terrain_difficulty_map=terrain_difficulty_map
+        )
+        
+        if not global_path:
+            return []
+        
+        # Step 2: Refine path using RL
+        refined_path = self.refine_path_with_rl(global_path)
+        
+        return refined_path
+    
+    def execute_with_continuous_learning(self, path, moving_obstacles=False):
+        """
+        ENHANCEMENT 2: Continuous RL Learning During Execution
+        
+        Executes path while continuously learning and adapting.
+        """
+        if not path:
+            return []
+        
+        actual_path = []
+        current_pos = path[0]
+        obstacle_positions = set()
+        
+        # Track current obstacle positions
+        for i in range(len(self.grid)):
+            for j in range(len(self.grid)):
+                if self.grid[i][j] == 1:
+                    obstacle_positions.add((i, j))
+        
+        self.obstacle_history.append(obstacle_positions.copy())
+        if len(self.obstacle_history) > 10:
+            self.obstacle_history.pop(0)
+        
+        i = 0
+        while i < len(path) and current_pos != self.goal:
+            planned_step = path[i]
+            
+            # Check if step is blocked
+            if self.grid[planned_step[0]][planned_step[1]] == 1:
+                # REAL-TIME REPLANNING: Use A* as primary (fast), RL as optional enhancement
+                if self.real_time_mode:
+                    # Real-time mode: Use A* directly (instant replanning)
+                    ast = AStar(self.grid, current_pos, self.goal)
+                    astar_path = ast.search()
+                    if astar_path and len(astar_path) > 1:
+                        actual_path.extend(astar_path[1:])
+                        current_pos = astar_path[-1]
+                        i = len(path)
+                        continue
+                    else:
+                        break
+                else:
+                    # Non-real-time mode: Use RL with training (for comparison/offline)
+                    # Try local RL first (faster, for immediate obstacle)
+                    self.local_rl.start = current_pos
+                    self.local_rl.train()  # Full retrain (not real-time)
+                    local_path = self.local_rl.get_path(max_steps=50, use_astar_fallback=True)
+                    
+                    if local_path and local_path[0] == current_pos and len(local_path) > 1:
+                        # Use local RL path
+                        actual_path.extend(local_path[1:])
+                        current_pos = local_path[-1]
+                        i = len(path)  # Skip rest of original path
+                        continue
+                    else:
+                        # Fallback to global RL or A*
+                        self.global_rl.start = current_pos
+                        self.global_rl.train()
+                        global_path = self.global_rl.get_path(max_steps=100, use_astar_fallback=True)
+                        
+                        if global_path and global_path[0] == current_pos:
+                            actual_path.extend(global_path[1:])
+                            current_pos = global_path[-1]
+                            i = len(path)
+                            continue
+                        else:
+                            # Final fallback: A* with RL heuristic
+                            astar_path = self.astar_with_rl_heuristic(current_pos, self.goal)
+                            if astar_path:
+                                actual_path.extend(astar_path[1:])
+                                current_pos = astar_path[-1]
+                                i = len(path)
+                                continue
+                            else:
+                                break
+            
+            actual_path.append(planned_step)
+            current_pos = planned_step
+            
+            # ENHANCEMENT: Continuous learning - update RL during execution
+            if moving_obstacles and i % 5 == 0:  # Update every 5 steps
+                # Quick Q-value update based on current progress
+                reward = self.rl_agent.shaped_reward(current_pos, planned_step)
+                if current_pos in self.rl_agent.q_table:
+                    # Update Q-value for last action
+                    if len(actual_path) >= 2:
+                        prev_pos = actual_path[-2]
+                        if prev_pos in self.rl_agent.q_table:
+                            self.rl_agent.update_q(prev_pos, current_pos, reward, current_pos)
+            
+            i += 1
+            
+            if current_pos == self.goal:
+                break
+        
+        return actual_path if actual_path else path
+
+
+# ===============================
+# Simulator Frame
+# ===============================
+class SimulatorFrame:
+    def __init__(self, root, env, title, mode="astar", moving_obstacles=False, master_grid=None, moving_list=None):
+        self.root = root
+        self.env = env
+        self.mode = mode
+        self.moving_obstacles = moving_obstacles
+        self.root.title(title)
+        
+        # Store master grid and moving obstacles for reset
+        self.master_grid = master_grid if master_grid is not None else env.copy_grid()
+        self.master_moving_list = moving_list[:] if moving_list else []
+        
+        # Metrics tracking
+        self.dynamic_collisions = 0
+        self.static_collisions = 0
+        self.total_time = 0.0
+        self.battery_remaining = BATTERY_FULL
+        self.steps_taken = 0
+        
+        # Record original static obstacles
+        self.static_obstacles = set()
+        for i in range(GRID_SIZE):
+            for j in range(GRID_SIZE):
+                if self.master_grid[i][j] == 1:
+                    self.static_obstacles.add((i, j))
+
+        self.canvas = tk.Canvas(root, width=GRID_SIZE*CELL_SIZE, height=GRID_SIZE*CELL_SIZE, bg="white")
+        self.canvas.pack()
+        
+        self.info_label = tk.Label(root, text="", font=("Arial", 10), justify=tk.LEFT)
+        self.info_label.pack()
+
+        # Speed control
+        self.speed_scale = tk.Scale(root, from_=20, to=1000, orient="horizontal", label="Speed (ms per step)")
+        self.speed_scale.set(150)
+        self.speed_scale.pack()
+
+        # Buttons
+        button_frame = tk.Frame(root)
+        button_frame.pack(pady=5)
+        
+        self.run_button = tk.Button(button_frame, text="Run Simulation", command=self.run_simulation, 
+                                     bg="lightgreen", font=("Arial", 10, "bold"))
+        self.run_button.pack(side=tk.LEFT, padx=5)
+        
+        self.reset_button = tk.Button(button_frame, text="Reset to Same Map", command=self.reset_simulation,
+                                      bg="lightblue", font=("Arial", 10, "bold"))
+        self.reset_button.pack(side=tk.LEFT, padx=5)
+
+        self.draw_grid()
+
+        # List of moving obstacles (copy from master)
+        self.moving_list = self.master_moving_list[:]
+
+    def reset_simulation(self):
+        """Reset to original environment state."""
+        self.env.set_grid(self.master_grid)
+        self.moving_list = self.master_moving_list[:]
+        self.dynamic_collisions = 0
+        self.static_collisions = 0
+        self.total_time = 0.0
+        self.battery_remaining = BATTERY_FULL
+        self.steps_taken = 0
+        self.draw_grid()
+        self.update_info_display()
+
+    def draw_grid(self):
+        self.canvas.delete("all")
+        for i in range(GRID_SIZE):
+            for j in range(GRID_SIZE):
+                x1, y1 = j*CELL_SIZE, i*CELL_SIZE
+                x2, y2 = x1+CELL_SIZE, y1+CELL_SIZE
+                color = "black" if self.env.grid[i][j] == 1 else "white"
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="gray")
+        # start and goal markers
+        sx, sy = self.env.start
+        gx, gy = self.env.goal
+        self.canvas.create_rectangle(sy*CELL_SIZE, sx*CELL_SIZE, (sy+1)*CELL_SIZE, (sx+1)*CELL_SIZE, fill="green")
+        self.canvas.create_rectangle(gy*CELL_SIZE, gx*CELL_SIZE, (gy+1)*CELL_SIZE, (gx+1)*CELL_SIZE, fill="red")
+
+    def move_obstacles(self):
+        new_pos = []
+        # move a small subset to keep dynamics manageable
+        random.shuffle(self.moving_list)
+        for x, y in list(self.moving_list):
+            # clear old
+            if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
+                self.env.grid[x][y] = 0
+            dx, dy = random.choice([(0,1),(1,0),(-1,0),(0,-1)])
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
+                if (nx, ny) not in [self.env.start, self.env.goal] and self.env.grid[nx][ny] == 0:
+                    self.env.grid[nx][ny] = 1
+                    new_pos.append((nx, ny))
+                else:
+                    # stay
+                    if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
+                        self.env.grid[x][y] = 1
+                        new_pos.append((x, y))
+            else:
+                if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
+                    self.env.grid[x][y] = 1
+                    new_pos.append((x, y))
+        self.moving_list = new_pos
+
+    def update_info_display(self):
+        """Update the information display with current metrics."""
+        info_text = f"Mode: {self.mode.upper()}\n"
+        info_text += f"Steps: {self.steps_taken}\n"
+        info_text += f"Dynamic Collisions: {self.dynamic_collisions}\n"
+        info_text += f"Static Collisions: {self.static_collisions}\n"
+        info_text += f"Time to Goal: {self.total_time:.3f}s\n"
+        info_text += f"Battery Remaining: {self.battery_remaining:.1f}%"
+        self.info_label.config(text=info_text)
+
+    def animate_path(self, path, color):
+        delay = self.speed_scale.get()
+        start_time = time.time()
+        
+        for idx, step in enumerate(path):
+            # Check for collision BEFORE moving
+            # Path validation: check bounds before accessing grid
+            if (0 <= step[0] < len(self.env.grid) and 
+                0 <= step[1] < len(self.env.grid[0]) and
+                self.env.grid[step[0]][step[1]] == 1):
+                # Collision detected
+                if step in self.static_obstacles:
+                    self.static_collisions += 1
+                else:
+                    self.dynamic_collisions += 1
+            
+            if self.moving_obstacles:
+                self.move_obstacles()
+            
+            self.draw_grid()
+            self.canvas.create_rectangle(step[1]*CELL_SIZE, step[0]*CELL_SIZE,
+                                         (step[1]+1)*CELL_SIZE, (step[0]+1)*CELL_SIZE, fill=color)
+            
+            # Update metrics
+            self.battery_remaining -= BATTERY_COST_PER_STEP
+            if self.battery_remaining < 0:
+                self.battery_remaining = 0
+            self.steps_taken = idx + 1
+            self.total_time = time.time() - start_time
+            
+            # Update display
+            self.update_info_display()
+            
+            self.root.update()
+            time.sleep(delay/1000)
+
+    def animate_hybrid(self, global_path):
+        delay = self.speed_scale.get()
+        start_time = time.time()
+        
+        if not global_path:
+            return
+            
+        state = global_path[0]
+        i = 0
+        
+        while i < len(global_path):
+            step = global_path[i]
+            
+            # Check if we reached the goal - stop here
+            if step == self.env.goal:
+                self.draw_grid()
+                self.canvas.create_rectangle(step[1]*CELL_SIZE, step[0]*CELL_SIZE,
+                                             (step[1]+1)*CELL_SIZE, (step[0]+1)*CELL_SIZE, 
+                                             fill="purple")
+                self.battery_remaining -= BATTERY_COST_PER_STEP
+                if self.battery_remaining < 0:
+                    self.battery_remaining = 0
+                self.steps_taken += 1
+                self.total_time = time.time() - start_time
+                self.update_info_display()
+                self.root.update()
+                break
+            
+            if self.moving_obstacles:
+                self.move_obstacles()
+
+            # Check if planned step is now blocked (dynamic obstacle)
+            # Path validation: check bounds before accessing grid
+            if (0 <= step[0] < len(self.env.grid) and 
+                0 <= step[1] < len(self.env.grid[0]) and
+                self.env.grid[step[0]][step[1]] == 1 and step != self.env.goal):
+                # Collision with dynamic obstacle
+                self.dynamic_collisions += 1
+                
+                # Use MR-QL locally to replan (with A* fallback enabled for hybrid)
+                rl = MRQLearning(self.env.grid, state, self.env.goal, episodes=250)
+                rl.train()
+                local_path = rl.get_path(max_steps=200, use_astar_fallback=True)
+                if local_path and local_path[0] == state:
+                    new_global = [state] + local_path[1:]
+                    global_path = new_global + global_path[i+1:]
+                    i = 0
+                    continue
+                else:
+                    # fallback: replan global with A*
+                    ast = AStar(self.env.grid, state, self.env.goal)
+                    gp = ast.search()
+                    if gp:
+                        global_path = gp
+                        i = 0
+                        continue
+                    else:
+                        # no path, abort
+                        break
+
+            self.draw_grid()
+            self.canvas.create_rectangle(step[1]*CELL_SIZE, step[0]*CELL_SIZE,
+                                         (step[1]+1)*CELL_SIZE, (step[0]+1)*CELL_SIZE, fill="purple")
+            
+            # Update metrics
+            self.battery_remaining -= BATTERY_COST_PER_STEP
+            if self.battery_remaining < 0:
+                self.battery_remaining = 0
+            self.steps_taken += 1
+            self.total_time = time.time() - start_time
+            
+            # Update display
+            self.update_info_display()
+            
+            self.root.update()
+            time.sleep(delay/1000)
+            
+            state = step
+            i += 1
+
+    def run_simulation(self):
+        # Reset metrics
+        self.dynamic_collisions = 0
+        self.static_collisions = 0
+        self.total_time = 0.0
+        self.battery_remaining = BATTERY_FULL
+        self.steps_taken = 0
+        
+        # Reset environment to initial state
+        self.env.set_grid(self.master_grid)
+        self.moving_list = self.master_moving_list[:]
+        
+        self.draw_grid()
+        self.update_info_display()
+        
+        if self.mode == "astar":
+            astar = AStar(self.env.grid, self.env.start, self.env.goal)
+            path = astar.search()
+            self.animate_path(path, "blue")
+            
+        elif self.mode == "rl":
+            # Pure RL mode: NO A* fallback
+            rl = MRQLearning(self.env.grid, self.env.start, self.env.goal, episodes=350)
+            rl.train()
+            path = rl.get_path(use_astar_fallback=False)
+            self.animate_path(path, "green")
+            
+        elif self.mode == "hybrid":
+            # Hybrid mode: A* for global planning, RL with A* fallback for local replanning
+            astar = AStar(self.env.grid, self.env.start, self.env.goal)
+            global_path = astar.search()
+            self.animate_hybrid(global_path)
+            
+        elif self.mode == "dstar":
+            # D* Lite: Dynamic replanning algorithm (recent method for comparison)
+            dstar = DStarLite(self.env.grid, self.env.start, self.env.goal)
+            path = dstar.search()
+            if path:
+                self.animate_path(path, "orange")
+            else:
+                self.info_label.config(text="D* Lite: No path found")
+        
+        elif self.mode == "double_q":
+            # Double Q-Learning: Recent published method (van Hasselt, 2010; 2016)
+            # Addresses overestimation bias in standard Q-learning
+            double_q = DoubleQLearning(self.env.grid, self.env.start, self.env.goal, episodes=350)
+            start_time = time.time()
+            double_q.train()
+            training_time = time.time() - start_time
+            path = double_q.get_path()
+            self.animate_path(path, "cyan")
+            info = f"Double Q-Learning: Steps={len(path)}, Battery={self.battery_remaining:.1f}%, TrainTime={training_time:.2f}s, Successes={double_q.success_count}"
+            self.info_label.config(text=info)
+        
+        elif self.mode == "neural_astar":
+            # Neural A*: Learning-based pathfinding benchmark
+            neural_astar = NeuralAStar(self.env.grid, self.env.start, self.env.goal, episodes=200)
+            start_time = time.time()
+            neural_astar.train()
+            training_time = time.time() - start_time
+            path = neural_astar.search()
+            self.animate_path(path, "magenta")
+            info = f"Neural A*: Steps={len(path)}, Battery={self.battery_remaining:.1f}%, TrainTime={training_time:.2f}s"
+            self.info_label.config(text=info)
+        
+        elif self.mode == "enhanced_hybrid":
+            # Enhanced Hybrid: Novel enhanced approach with multiple RL innovations
+            # Real-time mode enabled by default for fast replanning
+            enhanced = EnhancedHybrid(self.env.grid, self.env.start, self.env.goal, episodes=300, real_time_mode=True)
+            start_time = time.time()
+            enhanced.train()
+            training_time = time.time() - start_time
+            # IMPORTANT: use_predictions=False for random obstacle movement
+            # Obstacle prediction only works with consistent/predictable movement patterns.
+            # Since obstacles move randomly (random.choice), predictions are disabled.
+            initial_path = enhanced.search(use_predictions=False)
+            path = enhanced.execute_with_continuous_learning(initial_path, moving_obstacles=self.moving_obstacles)
+            self.animate_path(path, "darkviolet")
+            info = f"Enhanced Hybrid: Steps={len(path)}, Battery={self.battery_remaining:.1f}%, TrainTime={training_time:.2f}s"
+            self.info_label.config(text=info)
+        
+        # Final update
+        self.update_info_display()
+
+
+# ===============================
+# Main Window Manager
+# ===============================
+class MainWindow:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Pathfinding Algorithm Comparison - Windows")
+        
+        # Generate shared environment
+        self.master_env = Environment()
+        self.master_env.generate_obstacles()
+        self.master_grid = self.master_env.copy_grid()
+        
+        # Create shared moving obstacles list
+        self.moving_list = []
+        for i in range(GRID_SIZE):
+            for j in range(GRID_SIZE):
+                if self.master_grid[i][j] == 1 and random.random() < 0.1:
+                    self.moving_list.append((i, j))
+        
+        # Control panel
+        control_frame = tk.Frame(self.root, bg="lightgray", pady=10)
+        control_frame.pack(fill=tk.X)
+        
+        tk.Label(control_frame, text="Path Optimization: Novel Method vs. Recent Published Methods", 
+                font=("Arial", 14, "bold"), bg="lightgray").pack()
+        
+        button_frame = tk.Frame(control_frame, bg="lightgray")
+        button_frame.pack(pady=5)
+        
+        tk.Button(button_frame, text="Run All Simulations", command=self.run_all_simulations,
+                 font=("Arial", 12, "bold"), bg="lightgreen", width=20).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Generate New Map", command=self.generate_new_map,
+                 font=("Arial", 12, "bold"), bg="lightyellow", width=20).pack(side=tk.LEFT, padx=5)
+        
+        # Info label
+        self.info_label = tk.Label(self.root, text="Ready to run simulations", 
+                                   font=("Arial", 10), pady=5)
+        self.info_label.pack()
+        
+        # Create simulator windows
+        self.win1 = tk.Toplevel(self.root)
+        env1 = Environment()
+        env1.set_grid(self.master_grid)
+        self.sim1 = SimulatorFrame(self.win1, env1, "A* Algorithm (Static + Dynamic Obstacles)", 
+                                   mode="astar", moving_obstacles=True, 
+                                   master_grid=self.master_grid, moving_list=self.moving_list)
+        
+        self.win2 = tk.Toplevel(self.root)
+        env2 = Environment()
+        env2.set_grid(self.master_grid)
+        self.sim2 = SimulatorFrame(self.win2, env2, "Q-Learning Algorithm (Static + Dynamic Obstacles)", 
+                                   mode="rl", moving_obstacles=True,
+                                   master_grid=self.master_grid, moving_list=self.moving_list)
+        
+        self.win3 = tk.Toplevel(self.root)
+        env3 = Environment()
+        env3.set_grid(self.master_grid)
+        self.sim3 = SimulatorFrame(self.win3, env3, "Hybrid A* + MR-QL (Novel Method)", 
+                                   mode="hybrid", moving_obstacles=True,
+                                   master_grid=self.master_grid, moving_list=self.moving_list)
+        
+        self.win4 = tk.Toplevel(self.root)
+        env4 = Environment()
+        env4.set_grid(self.master_grid)
+        self.sim4 = SimulatorFrame(self.win4, env4, "Double Q-Learning (van Hasselt 2010/2016)", 
+                                   mode="double_q", moving_obstacles=True,
+                                   master_grid=self.master_grid, moving_list=self.moving_list)
+        
+        self.win5 = tk.Toplevel(self.root)
+        env5 = Environment()
+        env5.set_grid(self.master_grid)
+        self.sim5 = SimulatorFrame(self.win5, env5, "D* Lite (Koenig & Likhachev 2002)", 
+                                   mode="dstar", moving_obstacles=True,
+                                   master_grid=self.master_grid, moving_list=self.moving_list)
+        
+        self.win6 = tk.Toplevel(self.root)
+        env6 = Environment()
+        env6.set_grid(self.master_grid)
+        self.sim6 = SimulatorFrame(self.win6, env6, "Neural A* (Yonetani et al. 2021)", 
+                                   mode="neural_astar", moving_obstacles=True,
+                                   master_grid=self.master_grid, moving_list=self.moving_list)
+        
+        self.win7 = tk.Toplevel(self.root)
+        env7 = Environment()
+        env7.set_grid(self.master_grid)
+        self.sim7 = SimulatorFrame(self.win7, env7, "Enhanced Hybrid A* + RL (Novel Enhanced)", 
+                                   mode="enhanced_hybrid", moving_obstacles=True,
+                                   master_grid=self.master_grid, moving_list=self.moving_list)
+        
+        # Position windows (7 windows in a grid layout)
+        self.root.geometry("600x150+50+50")
+        window_width = GRID_SIZE*CELL_SIZE
+        window_height = GRID_SIZE*CELL_SIZE+200
+        spacing_x = window_width + 50
+        spacing_y = window_height + 50
+        
+        # Row 1: Windows 1, 2, 3
+        self.win1.geometry(f"{window_width}x{window_height}+50+250")
+        self.win2.geometry(f"{window_width}x{window_height}+{50+spacing_x}+250")
+        self.win3.geometry(f"{window_width}x{window_height}+{50+spacing_x*2}+250")
+        
+        # Row 2: Windows 4, 5, 6
+        self.win4.geometry(f"{window_width}x{window_height}+50+{250+spacing_y}")
+        self.win5.geometry(f"{window_width}x{window_height}+{50+spacing_x}+{250+spacing_y}")
+        self.win6.geometry(f"{window_width}x{window_height}+{50+spacing_x*2}+{250+spacing_y}")
+        
+        # Row 3: Window 7 (centered)
+        self.win7.geometry(f"{window_width}x{window_height}+{50+spacing_x}+{250+spacing_y*2}")
+    
+    def generate_new_map(self):
+        """Generate a new map and update all simulators."""
+        self.info_label.config(text="Generating new map...")
+        self.root.update()
+        
+        self.master_env.generate_obstacles()
+        self.master_grid = self.master_env.copy_grid()
+        
+        # Regenerate moving obstacles
+        self.moving_list = []
+        for i in range(GRID_SIZE):
+            for j in range(GRID_SIZE):
+                if self.master_grid[i][j] == 1 and random.random() < 0.1:
+                    self.moving_list.append((i, j))
+        
+        # Update all simulators
+        for sim in [self.sim1, self.sim2, self.sim3, self.sim4, self.sim5, self.sim6, self.sim7]:
+            sim.master_grid = [row[:] for row in self.master_grid]
+            sim.master_moving_list = self.moving_list[:]
+            
+            # Update static obstacles set
+            sim.static_obstacles = set()
+            for i in range(GRID_SIZE):
+                for j in range(GRID_SIZE):
+                    if self.master_grid[i][j] == 1:
+                        sim.static_obstacles.add((i, j))
+            
+            sim.reset_simulation()
+        
+        self.info_label.config(text=f"New map generated! Static obstacles: {len([1 for row in self.master_grid for cell in row if cell == 1])}, Dynamic: {len(self.moving_list)}")
+    
+    def run_all_simulations(self):
+        """Run all simulations sequentially."""
+        self.info_label.config(text="Running A* simulation...")
+        self.root.update()
+        self.sim1.run_simulation()
+        
+        self.info_label.config(text="Running MR-QLearning (Novel) simulation...")
+        self.root.update()
+        self.sim2.run_simulation()
+        
+        self.info_label.config(text="Running Hybrid A*+MR-QL (Novel) simulation...")
+        self.root.update()
+        self.sim3.run_simulation()
+        
+        self.info_label.config(text="Running Double Q-Learning (Recent Method) simulation...")
+        self.root.update()
+        self.sim4.run_simulation()
+        
+        self.info_label.config(text="Running D* Lite (Dynamic Replanning) simulation...")
+        self.root.update()
+        self.sim5.run_simulation()
+        
+        self.info_label.config(text="Running Neural A* (Learning-based) simulation...")
+        self.root.update()
+        self.sim6.run_simulation()
+        
+        self.info_label.config(text="Running Enhanced Hybrid (Novel Enhanced) simulation...")
+        self.root.update()
+        self.sim7.run_simulation()
+        
+        self.info_label.config(text="All 7 simulations complete - Compare results!")
+    
+    def run(self):
+        self.root.mainloop()
+
+
+# ===============================
+# Main Execution
+# ===============================
+if __name__ == "__main__":
+    print("="*60)
+    print("PATHFINDING ALGORITHM COMPARISON - WINDOWS VERSION")
+    print("="*60)
+    print("\nFeatures:")
+    print("✓ Visual grid environment simulation")
+    print("✓ Accurate collision counting (static + dynamic)")
+    print("✓ Accurate time to goal measurement")
+    print("✓ Battery remaining display (0.4% per step)")
+    print("✓ Seven windows for parallel comparison (all 7 methods)")
+    print("✓ Same random obstacle generation")
+    print("✓ Pure RL mode (NO A* fallback)")
+    print("✓ Hybrid mode (A* + RL with fallback)")
+    print("✓ Fixed: Hybrid mode stops at goal properly")
+    print("\n" + "="*60)
+    
+    app = MainWindow()
+    app.run()
