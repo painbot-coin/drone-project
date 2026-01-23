@@ -1,0 +1,161 @@
+{
+  "timestamp": "2025-12-13 04:43:35",
+  "analysis": {
+    "statistics": {
+      "astar": {
+        "success_rate": 100.0,
+        "path_length": {
+          "mean": 39,
+          "std": 0.0,
+          "ci_lower": 39.0,
+          "ci_upper": 39.0,
+          "n": 50
+        },
+        "time": {
+          "mean": 0.0009174013137817383,
+          "std": 0.00033947895357236445,
+          "ci_lower": 0.0008233025486864146,
+          "ci_upper": 0.001011500078877062,
+          "n": 50
+        },
+        "battery": {
+          "mean": 15.600000000000001,
+          "std": 0.0,
+          "ci_lower": 15.600000000000001,
+          "ci_upper": 15.600000000000001,
+          "n": 50
+        }
+      },
+      "dstar": {
+        "success_rate": 100.0,
+        "path_length": {
+          "mean": 39,
+          "std": 0.0,
+          "ci_lower": 39.0,
+          "ci_upper": 39.0,
+          "n": 50
+        },
+        "time": {
+          "mean": 0.011889238357543946,
+          "std": 0.003167175239007872,
+          "ci_lower": 0.011011342170770178,
+          "ci_upper": 0.012767134544317714,
+          "n": 50
+        },
+        "battery": {
+          "mean": 15.600000000000001,
+          "std": 0.0,
+          "ci_lower": 15.600000000000001,
+          "ci_upper": 15.600000000000001,
+          "n": 50
+        }
+      },
+      "double_q": {
+        "success_rate": 98.0,
+        "path_length": {
+          "mean": 40.51020408163265,
+          "std": 2.8731693373026808,
+          "ci_lower": 39.7057166671879,
+          "ci_upper": 41.3146914960774,
+          "n": 49
+        },
+        "time": {
+          "mean": 0.06024698734283447,
+          "std": 0.20937006756243634,
+          "ci_lower": 0.002212565478887811,
+          "ci_upper": 0.11828140920678112,
+          "n": 50
+        },
+        "battery": {
+          "mean": 16.20408163265306,
+          "std": 1.1492677349210723,
+          "ci_lower": 15.88228666687516,
+          "ci_upper": 16.525876598430962,
+          "n": 49
+        }
+      },
+      "mr_ql": {
+        "success_rate": 90.0,
+        "path_length": {
+          "mean": 41.4,
+          "std": 2.157439559882375,
+          "ci_lower": 40.76964028226942,
+          "ci_upper": 42.030359717730576,
+          "n": 45
+        },
+        "time": {
+          "mean": 0.4168106555938721,
+          "std": 1.0034762333208216,
+          "ci_lower": 0.13866123465232277,
+          "ci_upper": 0.6949600765354214,
+          "n": 50
+        },
+        "battery": {
+          "mean": 16.560000000000002,
+          "std": 0.8629758239529493,
+          "ci_lower": 16.30785611290777,
+          "ci_upper": 16.812143887092233,
+          "n": 45
+        }
+      },
+      "hybrid": {
+        "success_rate": 100.0,
+        "path_length": {
+          "mean": 39,
+          "std": 0.0,
+          "ci_lower": 39.0,
+          "ci_upper": 39.0,
+          "n": 50
+        },
+        "time": {
+          "mean": 0.0011370182037353516,
+          "std": 0.002064897486829014,
+          "ci_lower": 0.0005646578217017442,
+          "ci_upper": 0.001709378585768959,
+          "n": 50
+        },
+        "battery": {
+          "mean": 15.600000000000001,
+          "std": 0.0,
+          "ci_lower": 15.600000000000001,
+          "ci_upper": 15.600000000000001,
+          "n": 50
+        }
+      }
+    },
+    "t_tests": [
+      {
+        "t_statistic": 1.6860530515172065,
+        "p_value": null,
+        "significant": false,
+        "method1": "MR-QLearning",
+        "method2": "Double Q-Learning",
+        "mean_diff": 0.8897959183673478
+      },
+      {
+        "t_statistic": 7.870769540387689,
+        "p_value": null,
+        "significant": true,
+        "method1": "MR-QLearning",
+        "method2": "A*",
+        "mean_diff": 2.3999999999999986
+      },
+      {
+        "t_statistic": 0,
+        "p_value": null,
+        "significant": false,
+        "method1": "Hybrid A* + MR-QL",
+        "method2": "A*",
+        "mean_diff": 0
+      },
+      {
+        "t_statistic": 0,
+        "p_value": null,
+        "significant": false,
+        "method1": "Hybrid A* + MR-QL",
+        "method2": "D* Lite",
+        "mean_diff": 0
+      }
+    ]
+  }
+}
